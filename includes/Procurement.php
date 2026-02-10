@@ -33,9 +33,9 @@ class Procurement {
                 'budget_review', 
                 'procurement_planning',
                 'contract_execution',
-                'disbursements', // Note: table name is plural
-                'monitoring_reports', // Note: table name is plural
-                'audits' // Note: table name is plural
+                'disbursements',
+                'monitoring_reports',
+                'audits'
             ];
             
             foreach ($tables as $table) {
@@ -45,7 +45,7 @@ class Procurement {
             // Delete comments
             $this->db->query("DELETE FROM comments WHERE procurement_id = :id", ['id' => $id]);
             
-            // Delete activity log (table name is activity_logs, not activity_log)
+            // Delete activity log
             $this->db->query("DELETE FROM activity_logs WHERE procurement_id = :id", ['id' => $id]);
             
             // Delete the procurement itself
@@ -181,7 +181,7 @@ class Procurement {
             $id = $this->db->insert('contract_execution', $data);
         }
         
-        // Update actual value
+        // Update actual value in procurements table
         if (!empty($data['contract_amount'])) {
             $this->update($data['procurement_id'], ['actual_value' => $data['contract_amount']]);
         }
@@ -235,16 +235,61 @@ class Procurement {
         ];
     }
     
-    // Statistics
+    // Statistics - FIXED METHOD
     public function getStatistics() {
         $stats = [];
         
-        $stats['total'] = $this->db->selectOne("SELECT COUNT(*) as count FROM procurements")['count'];
-        $stats['in_progress'] = $this->db->selectOne("SELECT COUNT(*) as count FROM procurements WHERE status = 'in_progress'")['count'];
-        $stats['completed'] = $this->db->selectOne("SELECT COUNT(*) as count FROM procurements WHERE status = 'completed'")['count'];
-        $stats['total_value'] = $this->db->selectOne("SELECT SUM(actual_value) as total FROM procurements WHERE status = 'completed'")['total'] ?? 0;
+        // Total procurements
+        $result = $this->db->selectOne("SELECT COUNT(*) as count FROM procurements");
+        $stats['total'] = $result['count'] ?? 0;
         
+        // In progress procurements
+        $result = $this->db->selectOne("SELECT COUNT(*) as count FROM procurements WHERE status = 'in_progress'");
+        $stats['in_progress'] = $result['count'] ?? 0;
+        
+        // Completed procurements
+        $result = $this->db->selectOne("SELECT COUNT(*) as count FROM procurements WHERE status = 'completed'");
+        $stats['completed'] = $result['count'] ?? 0;
+        
+        // Total value - FIXED: Check multiple sources for value
+        $stats['total_value'] = 0;
+        
+        // First try to get from procurements.actual_value
+        $result = $this->db->selectOne("SELECT SUM(actual_value) as total FROM procurements WHERE status = 'completed'");
+        if ($result && $result['total'] !== null) {
+            $stats['total_value'] = (float)$result['total'];
+        }
+        
+        // If still 0, try contract_execution.contract_amount
+        if ($stats['total_value'] == 0) {
+            $result = $this->db->selectOne(
+                "SELECT SUM(ce.contract_amount) as total 
+                 FROM procurements p 
+                 LEFT JOIN contract_execution ce ON p.id = ce.procurement_id 
+                 WHERE p.status = 'completed'"
+            );
+            if ($result && $result['total'] !== null) {
+                $stats['total_value'] = (float)$result['total'];
+            }
+        }
+        
+        // If still 0, try budget_review.approved_amount
+        if ($stats['total_value'] == 0) {
+            $result = $this->db->selectOne(
+                "SELECT SUM(br.approved_amount) as total 
+                 FROM procurements p 
+                 LEFT JOIN budget_review br ON p.id = br.procurement_id 
+                 WHERE p.status = 'completed'"
+            );
+            if ($result && $result['total'] !== null) {
+                $stats['total_value'] = (float)$result['total'];
+            }
+        }
+        
+        // By stage
         $stats['by_stage'] = $this->db->select("SELECT current_stage, COUNT(*) as count FROM procurements WHERE status = 'in_progress' GROUP BY current_stage");
+        
+        // By department
         $stats['by_department'] = $this->db->select("SELECT department, COUNT(*) as count FROM procurements GROUP BY department ORDER BY count DESC LIMIT 5");
         
         return $stats;
@@ -301,8 +346,19 @@ class Procurement {
         );
     }
     
-    // Additional helper method for query execution (if needed)
+    // Additional helper method for query execution
     public function query($sql, $params = []) {
         return $this->db->query($sql, $params);
+    }
+    
+    // Get total contract value (fallback method)
+    public function getTotalContractValue() {
+        $result = $this->db->selectOne(
+            "SELECT SUM(ce.contract_amount) as total 
+             FROM procurements p 
+             LEFT JOIN contract_execution ce ON p.id = ce.procurement_id 
+             WHERE p.status = 'completed'"
+        );
+        return $result['total'] ?? 0;
     }
 }
